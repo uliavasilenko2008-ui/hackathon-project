@@ -70,3 +70,37 @@ def detect_language(text):
 
 
 # 3.КАТЕГОРИИ:
+HUMAN_TOPICS = {
+    'payment': ['оплат','платеж', 'платёж', 'списан', 'возврат', 'төлем',
+                'refund', 'payment', 'charge', 'pago', 'cobro', 'reembolso',
+                'pagamento', "to'lov", 'tolov'],
+    'ban_appeal': ['бан', 'заблок', 'блок', 'ban', 'block', 'bloque', 'blok'],
+    'hack': ['взлом', 'угнал', 'hack', 'robaron', 'roubaram', 'buzil'],
+}
+OTHER_TOPICS = {
+    'cheating': ['чит', 'cheat', 'trampa', 'trapaç'],
+    'toxicity': ['оскорб', 'токсич', 'abuse', 'insult'],
+    'bug': ['баг', 'вылет', 'ошибка', 'лаг', 'bug', 'crash', 'error'],
+}
+def count_hits(words, prefixes):
+    hits = 0
+    for word in words:
+        word_ls = word.lower()
+        if any(word_ls.startswith(p.lower()) for p in prefixes):
+                hits += 1
+    return hits
+
+
+def classify(text):
+    words = re.findall(r'\w+', text)
+
+    for topic, prefix in HUMAN_TOPICS.items():
+        if count_hits(words, prefix) > 0:
+            return topic, True
+
+    scores = {t: count_hits(words, p) for t, p in OTHER_TOPICS.items()}
+    best = max(scores, key=scores.get)
+
+    return (best, False) if scores[best] > 0 else ('other', False)
+
+# 4.НЕ ПРОВЕРЕННЫЙ ДОНОС:
