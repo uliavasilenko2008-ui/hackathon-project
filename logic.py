@@ -1,8 +1,40 @@
-import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+# 1.ОБРАЩЕНИЕ:
+...
+from datetime import datetime
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
+...
+
+class Message(BaseModel):
+    role: Literal['player', 'reported_player', 'admin']
+    ts: datetime
+    text: str
+
+class Ticket(BaseModel):
+    ticket_id: str
+    kind: Literal['complaint', 'report']
+    created_at: datetime
+    region: str
+    server_language: Optional[str]
+    language: Literal['ru', 'kk', 'en', 'es', 'pt', 'uz', 'unknown']
+    reporter_hash: str
+    reported_hash: Optional[str] = None
+    reported_nick: Optional[str] = None
+    rule_refs_raw: str
+    images_count: int
+    messages: List[Message]
+    verdict: Literal['approved', 'rejected', 'need_evidence', 'invalid_format', 'duplicate']
+    punishment: Optional[str] = None
+    violation: Optional[str] = None
+    category: Optional[str] = None
+    priority: Optional[Literal['p0', 'p1', 'p2', 'p3']] = None
+
+
+# 2.НОРМАЛИЗАЦИЯ И ОПРЕДЕЛЕНИЕ ЯЗЫКА:
+...
 import re
 from lingua import Language, LanguageDetectorBuilder
+...
 
 KZ_FIX = {'ќ': 'қ', 'ґ': 'ғ', 'ѕ': 'ң', 'є': 'ә', 'ј': 'ө', 'ў': 'ұ', 'ї': 'ү'}
 KZ_LETTERS = set("қғңәөұүһі")
@@ -37,3 +69,4 @@ def detect_language(text):
     return 'unknown'
 
 
+# 3.КАТЕГОРИИ:
