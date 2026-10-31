@@ -1,41 +1,15 @@
 # 1.ОБРАЩЕНИЕ:
-...
-from datetime import datetime
-from typing import List, Literal, Optional
-from pydantic import BaseModel
-from schemas import IncomingTicket, FinalResponse, ExtractedInfo, DraftReply
-...
-
-class Message(BaseModel):
-    role: Literal['player', 'reported_player', 'admin']
-    ts: datetime
-    text: str
-
-class Ticket(BaseModel):
-    ticket_id: str
-    kind: Literal['complaint', 'report']
-    created_at: datetime
-    region: str
-    server_language: Optional[str]
-    language: Literal['ru', 'kk', 'en', 'es', 'pt', 'uz', 'unknown']
-    reporter_hash: str
-    reported_hash: Optional[str] = None
-    reported_nick: Optional[str] = None
-    rule_refs_raw: str
-    images_count: int
-    messages: List[Message]
-    verdict: Literal['approved', 'rejected', 'need_evidence', 'invalid_format', 'duplicate']
-    punishment: Optional[str] = None
-    violation: Optional[str] = None
-    category: Optional[str] = None
-    priority: Optional[Literal['p0', 'p1', 'p2', 'p3']] = None
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from lingua import Language, LanguageDetectorBuilder
+from config import RULES_PATH
+from data_loader import load_json
 
 
 # 2.НОРМАЛИЗАЦИЯ И ОПРЕДЕЛЕНИЕ ЯЗЫКА:
-...
 import re
 from lingua import Language, LanguageDetectorBuilder
-...
 
 KZ_FIX = {'ќ': 'қ', 'ґ': 'ғ', 'ѕ': 'ң', 'є': 'ә', 'ј': 'ө', 'ў': 'ұ', 'ї': 'ү'}
 KZ_LETTERS = set("қғңәөұүһі")
@@ -104,4 +78,81 @@ def classify(text):
 
     return (best, False) if scores[best] > 0 else ('other', False)
 
+#  ПРАВИЛА:
+def flatten_rules(node, out):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if isinstance(v, str) and re.fullmatch(r"\d+(\.\d+)*", str(k)):
+                out[str(k)] = v
+        rid = next((node[k] for k in ("id", "point_id", "point", "number", "num", "code") if k in node), None)
+        txt = next((node[k] for k in ("text", "title", "description", "rule", "name")
+                    if isinstance(node.get(k), str)), None)
+        if rid is not None and txt:
+            out[str(rid)] = txt
+        for v in node.values():
+            flatten_rules(v, out)
+    elif isinstance(node, list):
+        for item in node:
+            flatten_rules(item, out)
+
+
+def load_rules():
+    rules = {}
+    try:
+        flatten_rules(load_json(RULES_PATH), rules)
+    except FileNotFoundError:
+        pass
+    return rules or {"0.0": "Тестовое правило: запрещены читы."}
+
+
+RULES = load_rules()
+
+
+def find_rules(text, top=2, threshold=0.1):
+    ids = list(RULES)
+    if not ids:
+        return []
+
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5))
+    matrix = vec.fit_transform([RULES[i].lower() for i in ids] + [text.lower()])
+
+    # Считаем схожесть
+    sims_matrix = cosine_similarity(matrix[-1], matrix[:-1])
+
+    if sims_matrix.shape[0] > 0:
+        sims = sims_matrix[0]
+    else:
+        return []
+
+    ranked = sorted(zip(ids, sims), key=lambda p: p[1], reverse=True)
+    return [i for i, s in ranked[:top] if s >= threshold]
+
+# ЧЕРНОВИК ОТВЕТА:
+TEMPLATES = {
+    "ru": "Здравствуйте! Спасибо за обращение. Мы изучим ситуацию{refs}.",
+    "en": "Hello! Thank you for your report. We will review the situation{refs}.",
+    "kk": "Сәлеметсіз бе! Хабарласқаныңыз үшін рахмет. Жағдайды қарастырамыз{refs}.",
+    "es": "¡Hola! Gracias por su mensaje. Revisaremos la situación{refs}.",
+    "pt": "Olá! Obrigado pelo seu contato. Vamos analisar a situação{refs}.",
+    "uz": "Salom! Murojaatingiz uchun rahmat. Vaziyatni ko'rib chiqamiz{refs}.",
+}
+HUMAN_TEMPLATES = {
+    "ru": "Здравствуйте! Ваше обращение передано специалисту поддержки.",
+    "en": "Hello! Your request has been passed to a support specialist.",
+    "kk": "Сәлеметсіз бе! Сіздің өтінішіңіз қолдау маманына жіберілді.",
+    "es": "¡Hola! Su solicitud ha sido transferida a un especialista de soporte.",
+    "pt": "Olá! Seu pedido foi encaminhado a um especialista de suporte.",
+    "uz": "Salom! Murojaatingiz qo'llab-quvvatlash mutaxassisiga yuborildi.",
+}
+
+
+def draft_reply(lang, rule_ids, human):
+    lang = lang if lang in TEMPLATES else "en"
+    if human:
+        return HUMAN_TEMPLATES[lang]
+    refs = f" (п. {', '.join(rule_ids)})" if rule_ids else ""
+    return TEMPLATES[lang].format(refs=refs)
+
 # 4.НЕ ПРОВЕРЕННЫЙ ДОНОС:
+
+print(len(RULES), list(RULES)[:5])
