@@ -1,18 +1,13 @@
-# 1.ОБРАЩЕНИЕ:
 import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
 from lingua import Language, LanguageDetectorBuilder
-from config import RULES_PATH
+from config import RULES_PATH, TAXONOMY_PATH
 from data_loader import load_json
 
 
-# 2.НОРМАЛИЗАЦИЯ И ОПРЕДЕЛЕНИЕ ЯЗЫКА:
-import re
-from lingua import Language, LanguageDetectorBuilder
-
+# 1.НОРМАЛИЗАЦИЯ И ЯЗЫК:
 KZ_FIX = {'ќ': 'қ', 'ґ': 'ғ', 'ѕ': 'ң', 'є': 'ә', 'ј': 'ө', 'ў': 'ұ', 'ї': 'ү'}
 KZ_LETTERS = set("қғңәөұүһі")
+
 
 def normalize(text):
     text = text.lower()
@@ -20,7 +15,8 @@ def normalize(text):
         text = text.replace(bad, good)
     return text.strip()
 
-# турецкий замена узбекскому (узбекского в lingua нет)
+
+# турецкий как замена узбекскому (узбекского в lingua нет)
 LATIN_DETECTOR = LanguageDetectorBuilder.from_languages(
     Language.ENGLISH, Language.SPANISH, Language.PORTUGUESE, Language.TURKISH
 ).build()
@@ -31,6 +27,7 @@ LANG_MAP = {
     Language.PORTUGUESE: 'pt',
     Language.TURKISH: 'uz',
 }
+
 
 def detect_language(text):
     t = normalize(text)
@@ -44,9 +41,9 @@ def detect_language(text):
     return 'unknown'
 
 
-# 3.КАТЕГОРИИ:
+# 2.ТЕМЫ:
 HUMAN_TOPICS = {
-    'payment': ['оплат','платеж', 'платёж', 'списан', 'возврат', 'төлем',
+    'payment': ['оплат', 'платеж', 'платёж', 'списан', 'возврат', 'төлем',
                 'refund', 'payment', 'charge', 'pago', 'cobro', 'reembolso',
                 'pagamento', "to'lov", 'tolov'],
     'ban_appeal': ['бан', 'заблок', 'блок', 'ban', 'block', 'bloque', 'blok'],
@@ -57,77 +54,89 @@ OTHER_TOPICS = {
     'toxicity': ['оскорб', 'токсич', 'abuse', 'insult'],
     'bug': ['баг', 'вылет', 'ошибка', 'лаг', 'bug', 'crash', 'error'],
 }
+
+
 def count_hits(words, prefixes):
     hits = 0
     for word in words:
-        word_ls = word.lower()
-        if any(word_ls.startswith(p.lower()) for p in prefixes):
-                hits += 1
+        if any(word.lower().startswith(p.lower()) for p in prefixes):
+            hits += 1
     return hits
 
 
 def classify(text):
     words = re.findall(r'\w+', text)
-
-    for topic, prefix in HUMAN_TOPICS.items():
-        if count_hits(words, prefix) > 0:
+    for topic, prefixes in HUMAN_TOPICS.items():
+        if count_hits(words, prefixes) > 0:
             return topic, True
-
     scores = {t: count_hits(words, p) for t, p in OTHER_TOPICS.items()}
     best = max(scores, key=scores.get)
-
     return (best, False) if scores[best] > 0 else ('other', False)
 
-#  ПРАВИЛА:
-def flatten_rules(node, out):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if isinstance(v, str) and re.fullmatch(r"\d+(\.\d+)*", str(k)):
-                out[str(k)] = v
-        rid = next((node[k] for k in ("id", "point_id", "point", "number", "num", "code") if k in node), None)
-        txt = next((node[k] for k in ("text", "title", "description", "rule", "name")
-                    if isinstance(node.get(k), str)), None)
-        if rid is not None and txt:
-            out[str(rid)] = txt
-        for v in node.values():
-            flatten_rules(v, out)
-    elif isinstance(node, list):
-        for item in node:
-            flatten_rules(item, out)
 
-
+# 3.ПРАВИЛА:
 def load_rules():
     rules = {}
     try:
-        flatten_rules(load_json(RULES_PATH), rules)
+        for sec in load_json(RULES_PATH)["rules"]:
+            for p in sec.get("points", []):
+                rules[f"{sec['id']}:{p['ref']}"] = p["text"]
     except FileNotFoundError:
         pass
-    return rules or {"0.0": "Тестовое правило: запрещены читы."}
+    return rules or {"0:0": "Тестовое правило: запрещены читы."}
 
 
 RULES = load_rules()
 
 
-def find_rules(text, top=2, threshold=0.1):
-    ids = list(RULES)
-    if not ids:
-        return []
+# 4.КАТЕГОРИЯ И ПРИОРИТЕТЫ:
+try:
+    TAX = load_json(TAXONOMY_PATH)
+except FileNotFoundError:
+    TAX = {"categories": [], "needs_human_always": []}
 
-    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(3, 5))
-    matrix = vec.fit_transform([RULES[i].lower() for i in ids] + [text.lower()])
+ALWAYS_HUMAN = set(TAX["needs_human_always"])
+CAT_KIND = {c["code"]: c["kind"] for c in TAX["categories"]}
+RULE_TO_CAT = {}
+for c in TAX["categories"]:
+    for r in c["rules"]:
+        RULE_TO_CAT.setdefault(r, c["code"])
+        CAT_RULES = {c["code"]: c["rules"] for c in TAX["categories"]}
 
-    # Считаем схожесть
-    sims_matrix = cosine_similarity(matrix[-1], matrix[:-1])
+TOPIC_TO_CAT = {
+    "payment": "report.payment", "hack": "report.account",
+    "ban_appeal": "complaint.admin", "cheating": "complaint.cheat",
+    "toxicity": "complaint.insult", "bug": "report.help",
+}
 
-    if sims_matrix.shape[0] > 0:
-        sims = sims_matrix[0]
-    else:
-        return []
+# ПРЕДПОЛОЖЕНИЕ:
+PRIORITY = {
+    "report.account": "p0", "report.payment": "p0",
+    "complaint.cheat": "p1", "complaint.scam": "p1", "complaint.rmt_ads": "p1",
+    "complaint.insult": "p2", "complaint.dm": "p2", "complaint.admin": "p2",
+    "report.complaint": "p2",
+    "complaint.other": "p3", "complaint.invalid": "p3", "report.question": "p3",
+    "report.help": "p3", "report.offtopic": "p3",
+}
 
-    ranked = sorted(zip(ids, sims), key=lambda p: p[1], reverse=True)
-    return [i for i, s in ranked[:top] if s >= threshold]
 
-# ЧЕРНОВИК ОТВЕТА:
+def categorize(kind, topic, rule_ids):
+    cat = TOPIC_TO_CAT.get(topic)
+    if cat is None and rule_ids:
+        sec, ref = rule_ids[0].split(":")
+        if sec == "32":
+            cat = RULE_TO_CAT.get("GZ")
+        elif sec == "30":
+            cat = RULE_TO_CAT.get(ref)
+    if CAT_KIND.get(cat) != kind:
+        if kind == "report" and cat and cat.startswith("complaint."):
+            cat = "report.complaint"
+        else:
+            cat = "complaint.other" if kind == "complaint" else "report.question"
+    return cat
+
+
+# 5.ЧЕРНОВИК ОТВЕТА:
 TEMPLATES = {
     "ru": "Здравствуйте! Спасибо за обращение. Мы изучим ситуацию{refs}.",
     "en": "Hello! Thank you for your report. We will review the situation{refs}.",
@@ -152,7 +161,3 @@ def draft_reply(lang, rule_ids, human):
         return HUMAN_TEMPLATES[lang]
     refs = f" (п. {', '.join(rule_ids)})" if rule_ids else ""
     return TEMPLATES[lang].format(refs=refs)
-
-# 4.НЕ ПРОВЕРЕННЫЙ ДОНОС:
-
-print(len(RULES), list(RULES)[:5])
